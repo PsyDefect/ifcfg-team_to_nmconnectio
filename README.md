@@ -43,13 +43,13 @@ python <script_name>.py [options]
 ## Examples:
 
 1. Process default system path, output to ./nm_files, show detailed instructions:
-```bash
-python team_to_bond_converter.py -o ./nm_files -v
-```
+   ```bash
+   python team_to_bond_converter.py -o ./nm_files -v
+   ```
 1. Process files from a test directory, output to ./converted_configs:
-```bash
-python team_to_bond_converter.py -i /tmp/test_ifcfg -o ./converted_configs
-```
+   ```bash
+   python team_to_bond_converter.py -i /tmp/test_ifcfg -o ./converted_configs
+   ```
 ## Input Files
 
 The script expects to find files in the specified `--input-dir` with the following naming conventions and relevant content:
@@ -71,22 +71,22 @@ After running the script successfully:
 1. **Review Generated Files:** Carefully examine the `.nmconnection` files created in the output directory. Verify IP addresses, bond modes, member interfaces, static routes, and other settings.
 1. **Backup:** Ensure you have backed up your existing `/etc/sysconfig/network-scripts/` directory and potentially `/etc/NetworkManager/system-connections/`.
 1. **Move Files:** If the generated files are correct, move them to the NetworkManager system connections directory:
-```bash
-sudo mv /path/to/output_dir/*.nmconnection /etc/NetworkManager/system-connections/
-```
+   ```bash
+   sudo mv /path/to/output_dir/*.nmconnection /etc/NetworkManager/system-connections/
+   ```
 1. **Set Permissions:** Ensure the files have the correct ownership and permissions:
-```bash
-sudo chown root:root /etc/NetworkManager/system-connections/*.nmconnection
-sudo chmod 600 /etc/NetworkManager/system-connections/*.nmconnection
-```
+   ```bash
+   sudo chown root:root /etc/NetworkManager/system-connections/*.nmconnection
+   sudo chmod 600 /etc/NetworkManager/system-connections/*.nmconnection
+   ```
 1. **Reload NetworkManager:** Apply the new configuration:
-```bash
-sudo nmcli connection reload
-```
+   ```bash
+   sudo nmcli connection reload
+   ```
 1. **Activate Connection(s):** Bring up the new bond interface(s):
-```bash
-sudo nmcli connection up <bond_connection_name> # e.g., bond0
-```
+   ```bash
+   sudo nmcli connection up <bond_connection_name> # e.g., bond0
+   ```
 1. **Verify:** Thoroughly check network connectivity, IP configuration (`ip addr`), routing (`ip route`), and NetworkManager status (`nmcli device status`, `nmcli connection show`).
 1. **Cleanup (Optional but Recommended):** Once you are certain the new bond configuration is working correctly and persists after reboot, you can remove or archive the old `ifcfg-*` and `route-*` files for the converted team interfaces and their members from `/etc/sysconfig/network-scripts/` to avoid potential conflicts.
 
