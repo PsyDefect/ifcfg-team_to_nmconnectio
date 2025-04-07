@@ -1,0 +1,16 @@
+# Team 0 - Static IP, ActiveBackup, Aliases
+DEVICE=team0
+DEVICETYPE=Team
+ONBOOT=yes
+BOOTPROTO=static
+IPADDR=192.168.10.100
+PREFIX=24
+IPADDR1=192.168.10.101
+PREFIX1=24
+IPADDR2=10.0.0.5
+NETMASK2=255.0.0.0
+GATEWAY=192.168.10.1
+DNS1=8.8.8.8
+DNS2=8.8.4.4
+DOMAIN=example.local
+TEAM_CONFIG='{"runner": {"name": "activebackup"}, "link_watch": {"name": "ethtool"}}'

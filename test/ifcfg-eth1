@@ -1,0 +1,6 @@
+# Member of team0
+DEVICE=eth1
+ONBOOT=yes
+TEAM_MASTER=team0
+DEVICETYPE=TeamPort
+# HWADDR=... (Optional)

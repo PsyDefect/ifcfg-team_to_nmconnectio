@@ -1,0 +1,12 @@
+# Static routes for team0
+# Route to management network
+172.16.0.0/16 via 192.168.10.254
+# Route with metric
+10.100.50.0/24 via 192.168.10.253 metric 50
+# Default route (should be ignored by script in favor of GATEWAY=)
+default via 192.168.10.1
+# Another static route
+192.168.200.0/25 via 192.168.10.254
+# Unparseable line test
+this is not a valid route line
+10.1.1.0/24 via invalid-gateway # Invalid next hop test
