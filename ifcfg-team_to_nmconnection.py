@@ -10,15 +10,14 @@ This version handles:
 - Static IPv4 routes defined in corresponding route-<teamN> files (parses
   'ADDRESS/PREFIX via NEXT_HOP [metric METRIC]' format).
 - Allows specifying input and output directories via command-line arguments.
-- Includes a --verbose flag to control the display of detailed final instructions.
-- Exits with specific codes (see --help for details).
+- Outputs results, warnings, and errors in JSON format to STDOUT.
+- Exits with specific codes:
+  - 0: Success, no warnings.
+  - 1: Fatal error during setup or file writing.
+  - 3: Success, but warnings were generated during processing.
 
 *** This version writes the generated .nmconnection files to the directory
 *** specified by the --output-dir argument (defaults to CWD). ***
-
-The script focuses on a functional approach, separating parsing, generation logic,
-and I/O operations. It outputs status messages and warnings to standard output/error
-and writes the keyfiles to the specified output directory.
 """
 
 import os
@@ -35,7 +34,7 @@ DEFAULT_IFCFG_PATH = "/etc/sysconfig/network-scripts/"
 DEFAULT_OUTPUT_DIR = "." # Default to Current Working Directory
 
 # Standard directory where NetworkManager stores system connection profiles (keyfiles).
-# Used in instructions for the user on where to move the generated files.
+# Used in final instructions (if manually constructed from JSON).
 SYSTEM_NM_CONNECTIONS_DIR = "/etc/NetworkManager/system-connections/"
 # Mapping from teamd runner names (found in TEAM_CONFIG) to NetworkManager bond modes.
 TEAM_TO_BOND_MODE_MAP = {
@@ -57,7 +56,6 @@ EXIT_SUCCESS_WITH_WARNINGS = 3
 
 
 # --- Data Structures ---
-# (Data structures IfcfgConfig, Keyfile, GenerationResult, ParseResult, ParsedRoute remain unchanged)
 class IfcfgConfig(dict):
     """Simple wrapper class for type hinting dictionaries representing parsed ifcfg files."""
     pass
@@ -86,6 +84,12 @@ class ParsedRoute(NamedTuple):
     prefix: int
     next_hop: str
     metric: Optional[int]
+
+class ProcessedTeamInfo(NamedTuple):
+    """Holds summary information about a processed team for JSON output."""
+    team_device: str
+    bond_device: str
+    generated_files: List[str] # List of full paths to written files
 
 
 # --- Pure Helper Functions ---
@@ -303,17 +307,9 @@ def main():
     """ Main function to orchestrate the process. """
 
     # *** Setup Argument Parser ***
-    # Define epilog text for help message
-    epilog_text = f"""
-Exit Codes:
-  {EXIT_SUCCESS}: Success without warnings.
-  {EXIT_FATAL_ERROR}: Fatal error during setup (e.g., cannot access directories).
-  {EXIT_SUCCESS_WITH_WARNINGS}: Success, but warnings were generated during processing.
-"""
     parser = argparse.ArgumentParser(
         description="Convert RHEL ifcfg team configurations to NetworkManager bond keyfiles.",
-        formatter_class=argparse.RawDescriptionHelpFormatter, # Use RawDescriptionHelpFormatter to preserve epilog formatting
-        epilog=epilog_text # Add epilog to the help message
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     parser.add_argument(
         "-i", "--input-dir",
@@ -325,39 +321,47 @@ Exit Codes:
         default=DEFAULT_OUTPUT_DIR,
         help="Directory where generated *.nmconnection keyfiles will be written."
     )
-    parser.add_argument(
-        "-v", "--verbose",
-        action="store_true", # Sets args.verbose to True if flag is present
-        help="Print detailed instructions for next steps after writing files."
-    )
+    # Verbose flag removed as output is now JSON
     args = parser.parse_args() # Parse command-line arguments
 
     # Use parsed arguments for paths
     ifcfg_input_path = args.input_dir
     output_dir = args.output_dir
 
-    # *** Print effective paths ***
-    print(f"Using ifcfg script input path: {ifcfg_input_path}")
-    print(f"Using output directory: {output_dir}")
-    print("-" * 30)
+    # --- Data Collection for JSON Output ---
+    all_warnings: List[str] = []
+    fatal_errors: List[str] = [] # Keep track of fatal errors encountered before exit
+    write_errors: List[str] = []
+    processed_teams_summary: List[ProcessedTeamInfo] = []
+    all_generation_results: List[GenerationResult] = [] # Define before potential use
+    final_status = "success" # Assume success initially
+    final_exit_code = EXIT_SUCCESS
 
     # *** Ensure output directory exists ***
     try:
         if not os.path.isdir(output_dir):
-            print(f"Output directory '{output_dir}' does not exist. Creating it...")
+            # Attempt to create output directory if it doesn't exist
             os.makedirs(output_dir, exist_ok=True)
     except OSError as e:
-        print(f"Error: Could not create output directory '{output_dir}': {e}", file=sys.stderr)
-        sys.exit(EXIT_FATAL_ERROR) # Exit with fatal error code
+        # Fatal error if output directory cannot be accessed/created
+        error_msg = f"Error: Could not create or access output directory '{output_dir}': {e}"
+        # Print JSON error and exit immediately for fatal setup errors
+        print(json.dumps({"status": "fatal_error", "errors": [error_msg]}, indent=2), file=sys.stdout)
+        sys.exit(EXIT_FATAL_ERROR)
 
     # 1. Scan for ifcfg files in the specified input directory
     try:
-        all_files = os.listdir(ifcfg_input_path)
-        ifcfg_filenames = [f for f in all_files
+        all_files_in_input = os.listdir(ifcfg_input_path)
+        ifcfg_filenames = [f for f in all_files_in_input
                            if os.path.isfile(os.path.join(ifcfg_input_path, f)) and f.startswith('ifcfg-')]
-    except FileNotFoundError: print(f"Error: Network script input directory not found: {ifcfg_input_path}", file=sys.stderr); sys.exit(EXIT_FATAL_ERROR)
-    except OSError as e: print(f"Error: Cannot access network script input directory {ifcfg_input_path}: {e}", file=sys.stderr); sys.exit(EXIT_FATAL_ERROR)
-    print(f"Scanning {len(ifcfg_filenames)} ifcfg-* files in {ifcfg_input_path}...")
+    except FileNotFoundError:
+        error_msg = f"Error: Network script input directory not found: {ifcfg_input_path}"
+        print(json.dumps({"status": "fatal_error", "errors": [error_msg]}, indent=2), file=sys.stdout)
+        sys.exit(EXIT_FATAL_ERROR)
+    except OSError as e:
+        error_msg = f"Error: Cannot access network script input directory {ifcfg_input_path}: {e}"
+        print(json.dumps({"status": "fatal_error", "errors": [error_msg]}, indent=2), file=sys.stdout)
+        sys.exit(EXIT_FATAL_ERROR)
 
     # 2. Parse all found ifcfg files
     parse_results = [read_and_parse_ifcfg(os.path.join(ifcfg_input_path, f)) for f in ifcfg_filenames]
@@ -367,104 +371,99 @@ Exit Codes:
     for result in parse_results:
         if result.config is not None: key = result.config.get("DEVICE", result.filepath); valid_configs[key] = result.config
         elif result.error: parsing_errors.append(result.error)
+    all_warnings.extend(parsing_errors) # Add parsing errors to warnings list
 
     # 4. Identify team masters and map members
     team_configs: Dict[str, IfcfgConfig] = {}; member_map: Dict[str, List[Tuple[str, IfcfgConfig]]] = {}; member_assignment_warnings: List[str] = []
     for device_or_path, config in valid_configs.items():
         devicetype = config.get("DEVICETYPE", "").lower(); device = config.get("DEVICE")
-        if devicetype == "team" and device: print(f"Found Team Master: {device}"); team_configs[device] = config; member_map[device] = []
+        if devicetype == "team" and device: team_configs[device] = config; member_map[device] = [] # Found a team master
     for device_or_path, config in valid_configs.items():
          team_master = config.get("TEAM_MASTER"); device = config.get("DEVICE")
          if team_master and device:
-             if team_master in member_map: print(f"Found Member: {device} for Team: {team_master}"); member_map[team_master].append((device, config))
+             if team_master in member_map: member_map[team_master].append((device, config)) # Found a member
              else: member_assignment_warnings.append(f"Member {device} found for team {team_master}, but master config was not found or is invalid.")
+    all_warnings.extend(member_assignment_warnings) # Add assignment warnings
 
     # 5. Generate keyfile content for each identified team
-    all_generation_results: List[GenerationResult] = []; all_warnings: List[str] = parsing_errors + member_assignment_warnings; write_errors: List[str] = []
-    if not team_configs: print("\nNo Team interfaces (DEVICETYPE=Team) found in valid ifcfg files.")
-    else:
-        print(f"\nGenerating NetworkManager keyfile content for {len(team_configs)} team(s)...")
+    all_keyfiles_to_write: List[Keyfile] = [] # Collect all files to be written
+    if not team_configs and not all_warnings: # Only report 'no teams found' if no other errors/warnings exist yet
+        all_warnings.append("No Team interfaces (DEVICETYPE=Team) found in valid ifcfg files.")
+    elif team_configs: # Only proceed if teams were found
+        # This loop populates all_generation_results
         for team_device, master_config in team_configs.items():
             members = member_map.get(team_device, [])
-            print(f"--- Processing Team: {team_device} ---")
             static_routes: List[ParsedRoute] = []
-            route_filename = f"route-{team_device}"; route_filepath = os.path.join(ifcfg_input_path, route_filename) # Use input path
+            route_filename = f"route-{team_device}"; route_filepath = os.path.join(ifcfg_input_path, route_filename)
             if os.path.isfile(route_filepath):
-                print(f"Found and parsing route file: {route_filepath}")
                 parsed_routes, route_warnings = parse_route_file(route_filepath)
                 if route_warnings: all_warnings.extend([f"[{team_device}/Routes] {w}" for w in route_warnings])
-                if parsed_routes: print(f"  Found {len(parsed_routes)} static routes in {route_filename}."); static_routes = parsed_routes
+                if parsed_routes: static_routes = parsed_routes
+
             result = generate_single_keyfile_content(master_config, members, static_routes)
-            all_generation_results.append(result)
+            all_generation_results.append(result) # Append result here
             all_warnings.extend([f"[{result.team_device} -> {result.bond_device}] {w}" for w in result.warnings])
+            all_keyfiles_to_write.extend(result.keyfiles)
 
-    # 6. Print Warnings (Consolidated)
-    # Make warnings unique before printing
-    unique_warnings = sorted(list(set(all_warnings)))
-    if unique_warnings:
-        print("\n" + "="*70); print("=== Warnings Encountered ==="); print("="*70)
-        for warning in unique_warnings: print(f"- {warning}", file=sys.stderr)
-        print("="*70)
-
-    # 7. Write Keyfiles to Specified Output Directory
-    all_keyfiles: List[Keyfile] = [kf for res in all_generation_results for kf in res.keyfiles]
-    if all_keyfiles:
-        print("\n" + "="*70); print(f"=== Writing Generated Keyfiles ==="); print(f"Output Directory: {output_dir}")
-        print("Warning: Ensure you have write permissions in this directory."); print("="*70 + "\n")
-        for keyfile in all_keyfiles:
-            output_filepath = os.path.join(output_dir, keyfile.filename) # Use output_dir
+    # 6. Write Keyfiles to Specified Output Directory
+    written_files_summary: Dict[str, List[str]] = {} # Store successfully written files per team
+    if all_keyfiles_to_write:
+        for keyfile in all_keyfiles_to_write:
+            output_filepath = os.path.join(output_dir, keyfile.filename)
             try:
                 with open(output_filepath, 'w') as f: f.write(keyfile.content)
-                print(f"Successfully wrote: {output_filepath}")
-            except (IOError, OSError) as e: error_msg = f"Error writing file {output_filepath}: {e}"; print(error_msg, file=sys.stderr); write_errors.append(error_msg)
+                # Store successfully written file path, associating with bond device name
+                # Infer bond name from filename (handle master and slave cases)
+                base_filename = keyfile.filename.split('.')[0]
+                if "-slave-" in base_filename:
+                     bond_device_name = base_filename.split('-slave-')[1]
+                else:
+                     bond_device_name = base_filename # Assume it's the master bond file
 
-        # Print final instructions only if verbose flag is set
-        if args.verbose: # *** Check verbose flag ***
-            print("\n" + "="*70)
-            if write_errors: print("=== File Writing Errors ==="); print("="*70); [print(f"- {error}", file=sys.stderr) for error in write_errors]; print("="*70 + "\n")
-            print("=== Next Steps (Verbose) ==="); print("="*70); print("# IMPORTANT:")
-            print(f"# 1. Review the generated '.nmconnection' files in '{output_dir}'.")
-            print("#    **Verify that IP addresses, bond settings, AND static routes (if any) were converted correctly.**")
-            print(f"# 2. If correct, move the generated files from '{output_dir}' to '{SYSTEM_NM_CONNECTIONS_DIR}'.")
-            print(f"#    Example: sudo mv {os.path.join(output_dir, '*.nmconnection')} {SYSTEM_NM_CONNECTIONS_DIR}/")
-            print(f"# 3. Ensure files in '{SYSTEM_NM_CONNECTIONS_DIR}' are owned by root:")
-            print(f"#    `sudo chown root:root {SYSTEM_NM_CONNECTIONS_DIR}/*.nmconnection`")
-            print(f"# 4. Ensure files have permissions 600:")
-            print(f"#    `sudo chmod 600 {SYSTEM_NM_CONNECTIONS_DIR}/*.nmconnection`")
-            print("# 5. Reload NetworkManager: `sudo nmcli connection reload`")
-            print("# 6. Bring up the new connection: `sudo nmcli connection up <bond_con_name>` (e.g., 'bond0')")
-            print("# 7. Verify connectivity and configuration (`ip route`, `nmcli d`, etc.).")
-            print("# 8. Have console access during changes.")
-            print(f"# 9. Back up '{ifcfg_input_path}' first.")
-            print("# 10. After success, remove or archive old ifcfg and route-* files for the team/members.")
-            print("="*70)
-        else:
-            # Provide minimal confirmation if not verbose
-            print("\n" + "="*70)
-            print("Keyfile generation complete. Files written to:", output_dir)
-            if unique_warnings or write_errors:
-                 print("NOTE: Warnings or errors were encountered during execution (see details above).")
-            print("Run with -v or --verbose to see detailed next steps.")
-            print("="*70)
+                if bond_device_name not in written_files_summary:
+                     written_files_summary[bond_device_name] = []
+                written_files_summary[bond_device_name].append(output_filepath)
+            except (IOError, OSError) as e:
+                error_msg = f"Error writing file {output_filepath}: {e}"
+                write_errors.append(error_msg) # Collect write errors
 
-    elif not team_configs: pass
-    else: print("\nNo keyfile content was generated. Check warnings above for details.")
+    # 7. Populate Processed Teams Summary for JSON Output
+    # *** FIX: Ensure this loop runs only if teams were processed ***
+    if team_configs: # Check if team_configs was populated
+        for res in all_generation_results: # Now all_generation_results is guaranteed to exist if team_configs was not empty
+            processed_teams_summary.append(ProcessedTeamInfo(
+                team_device=res.team_device,
+                bond_device=res.bond_device,
+                generated_files=written_files_summary.get(res.bond_device, []) # Get files written for this bond
+            ))
 
-    # *** Final Exit Code Determination ***
-    final_exit_code = EXIT_SUCCESS # Default to success
-    if write_errors:
-        # If file writing failed, it's arguably a fatal error for the script's goal
-        print("\nExiting with error code due to file writing failures.", file=sys.stderr)
+    # 8. Determine Final Status and Exit Code
+    unique_warnings = sorted(list(set(all_warnings)))
+    all_errors = fatal_errors + write_errors # fatal_errors is currently always empty here, only write_errors matter
+
+    if all_errors:
+        final_status = "fatal_error"
         final_exit_code = EXIT_FATAL_ERROR
     elif unique_warnings:
-        # If warnings occurred but files were written (or no files needed writing)
-        print("\nExiting with warning code.", file=sys.stderr)
+        final_status = "success_with_warnings"
         final_exit_code = EXIT_SUCCESS_WITH_WARNINGS
     else:
-        # If no warnings and no write errors
-        print("\nExiting successfully.")
+        final_status = "success"
         final_exit_code = EXIT_SUCCESS
 
+    # 9. Construct Final JSON Output
+    json_output = {
+        "status": final_status,
+        "output_directory": output_dir,
+        "processed_teams": [info._asdict() for info in processed_teams_summary],
+        "warnings": unique_warnings,
+        "errors": all_errors,
+    }
+
+    # Print the final JSON result to stdout
+    print(json.dumps(json_output, indent=2))
+
+    # Exit with the appropriate code
     sys.exit(final_exit_code)
 
 
